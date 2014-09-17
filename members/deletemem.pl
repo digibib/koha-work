@@ -31,6 +31,7 @@ use C4::Auth;
 use C4::Members;
 use C4::Branch; # GetBranches
 use C4::VirtualShelves (); #no import
+use Koha::NorwegianPatronDB qw( NLMarkForDeletion NLSync );
 
 my $input = new CGI;
 
@@ -44,7 +45,22 @@ my ($template, $borrowernumber, $cookie)
                                         });
 
 #print $input->header;
-my $member=$input->param('member');
+my $member       = $input->param('member');
+
+# Handle deletion from the Norwegian national patron database, if it is enabled
+# If the "deletelocal" parameter is set to "false", the regular deletion will be
+# short circuited, and only a deletion from the national database can be carried
+# out. If "deletelocal" is set to "true", or not set to anything normal
+# deletion will be done.
+my $deletelocal  = $input->param('deletelocal')  eq 'false' ? 0 : 1; # Deleting locally is the default
+if ( C4::Context->preference('NorwegianPatronDBEnable') == 1 ) {
+    if ( $input->param('deleteremote') eq 'true' ) {
+        # Mark for deletion, then try a live sync
+        NLMarkForDeletion( $member );
+        NLSync({ 'borrowernumber' => $member });
+    }
+}
+
 my $issues = GetPendingIssues($member);     # FIXME: wasteful call when really, we only want the count
 my $countissues = scalar(@$issues);
 
@@ -80,7 +96,7 @@ my $dbh = C4::Context->dbh;
 my $sth=$dbh->prepare("Select * from borrowers where guarantorid=?");
 $sth->execute($member);
 my $data=$sth->fetchrow_hashref;
-if ($countissues > 0 or $flags->{'CHARGES'}  or $data->{'borrowernumber'}){
+if ($countissues > 0 or $flags->{'CHARGES'}  or $data->{'borrowernumber'} or $deletelocal == 0){
     #   print $input->header;
 
     my ($picture, $dberror) = GetPatronImage($bor->{'borrowernumber'});
@@ -112,8 +128,11 @@ if ($countissues > 0 or $flags->{'CHARGES'}  or $data->{'borrowernumber'}){
     if ($flags->{'CHARGES'} ne '') {
         $template->param(charges => $flags->{'CHARGES'}->{'amount'});
     }
-    if ($data) {
+    if ($data->{'borrowernumber'}) {
         $template->param(guarantees => 1);
+    }
+    if ($deletelocal == 0) {
+        $template->param(keeplocal => 1);
     }
 output_html_with_http_headers $input, $cookie, $template->output;
 
